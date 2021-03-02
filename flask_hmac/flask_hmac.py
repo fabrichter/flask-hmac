@@ -10,6 +10,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import re
 from functools import wraps
 
 # Third Party Libs
@@ -176,3 +177,88 @@ class Hmac(object):
 
         if signature not in hmac_server_tokens:
             raise InvalidSignature
+
+def sha256_hash_and_encode(data):
+    algo = hashlib.sha256()
+    algo.update(data)
+
+    hashed = algo.digest()
+    encoded = base64.b64encode(hashed)
+    return encoded
+
+
+class IETFHmac(Hmac):
+    """
+    Implements the format described in https://tools.ietf.org/html/draft-cavage-http-signatures-10#section-4.1.2
+
+    Ignores 'algorithm' field.
+    Can restrict 'keyId' to value provided in constructor; otherwhise ignored
+
+    Can also validate request body using the 'Digest' header
+
+    Example:
+    Signature: keyId="hmac-key-1",algorithm="hmac-sha256",
+        headers="host date digest content-length",
+        signature="Base64(HMAC-SHA256(signing string))"
+    """
+
+    # TODO: support more algorithms
+    DIGEST_ALGORITHMS = {'sha-256': sha256_hash_and_encode}
+
+    SIGNATURE_HEADER_PATTERN = re.compile(r'keyId="(?P<key_id>[a-zA-Z0-9-_]+)",algorithm="[a-zA-Z0-9\-_]+",headers="(?P<headers>[A-Za-z\-0-9 ]+)",signature="(?P<signature>[a-zA-Z0-9/=+]+)"')
+
+    def __init__(self, app=None, header=None, digestmod=None, key_id=None, validate_digest=False):
+        super().__init__(app, header, digestmod)
+        # TODO: support list of accepted key_id values
+        self.key_id = key_id
+        self.validate_digest = validate_digest
+
+    def _parse_signature(self, signature):
+        # FIXME: implement this
+        if '(request-target)' in signature:
+            raise NotImplementedError
+
+        parsed = IETFHmac.SIGNATURE_HEADER_PATTERN.fullmatch(signature)
+
+        if parsed is None:
+            raise InvalidSignature
+        if self.key_id is not None and parsed.group('key_id') != self.key_id:
+            raise InvalidSignature
+
+        return parsed.group('headers'), parsed.group('signature')
+
+    def extract_signature_from_header(self, request):
+        header = request.headers[self.header]
+        _, signature = self._parse_signature(header)
+        return signature
+
+    def get_hmac_data(self, request):
+        headers, _ = self._parse_signature(request.headers[self.header])
+
+        data = ''
+
+        for i, header_name in enumerate(headers):
+            header_values = request.headers.get_all(header_name)
+            if len(header_values) > 0:
+                header_values_string = ', '.join(header_values)
+                header_values_string = header_values_string.strip()
+                data += f'{header_name.lower()}: {header_values_string}'
+                if i != len(headers) - 1:
+                    data += '\n'
+        return data
+
+    def validate_signature(self, request, only=None):
+        if self.validate_digest:
+            if 'Digest' not in request.headers:
+                raise InvalidSignature
+            digests = request.headers['Digest'].split(',')
+            for digest in digests:
+                algorithm, expected_value = digest.split('=', maxsplit=1)
+                algorithm = algorithm.lower()
+                if algorithm not in IETFHmac.DIGEST_ALGORITHMS:
+                    raise NotImplementedError
+                computed_value = IETFHmac.DIGEST_ALGORITHMS[algorithm](request.data)
+                if computed_value != expected_value:
+                    raise InvalidSignature
+
+        return super().validate_signature(request, only)
