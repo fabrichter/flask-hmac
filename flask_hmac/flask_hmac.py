@@ -252,8 +252,8 @@ class IETFHmac(Hmac):
         return signature
 
     def get_hmac_data(self, request):
-        headers, _ = self._parse_signature(request.headers[self.header])
-
+        header_string, _ = self._parse_signature(request.headers[self.header])
+        headers = header_string.split()
         data = ''
 
         for i, header_name in enumerate(headers):
@@ -270,7 +270,6 @@ class IETFHmac(Hmac):
             digests = digest_header.split(',')
             for digest in digests:
                 algorithm, expected_value = digest.split('=', maxsplit=1)
-                print(algorithm, expected_value)
                 algorithm = algorithm.lower()
                 if algorithm not in self.__class__.DIGEST_ALGORITHMS:
                     raise NotImplementedError
