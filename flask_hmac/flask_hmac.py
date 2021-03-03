@@ -205,7 +205,13 @@ class IETFHmac(Hmac):
     # TODO: support more algorithms
     DIGEST_ALGORITHMS = {'sha-256': sha256_hash_and_encode}
 
-    SIGNATURE_HEADER_PATTERN = re.compile(r'keyId="(?P<key_id>[a-zA-Z0-9-_]+)",algorithm="[a-zA-Z0-9\-_]+",headers="(?P<headers>[A-Za-z\-0-9 ]+)",signature="(?P<signature>[a-zA-Z0-9/=+]+)"')
+    SIGNATURE_PATTERNS = {
+        'key_id': re.compile(r'keyId="([a-zA-Z0-9-_]+)"'),
+        'algorithm': re.compile(r'algorithm="([a-zA-Z0-9\-_]+)"'),
+        'headers': re.compile(r'headers="([A-Za-z\-0-9 ]+)"'),
+        'signature': re.compile(r'signature="([a-zA-Z0-9/=+]+)"')
+    }
+
 
     def __init__(self, app=None, header=None, digestmod=None, key_id=None, validate_digest=False):
         super().__init__(app, header, digestmod)
@@ -217,15 +223,28 @@ class IETFHmac(Hmac):
         # FIXME: implement this
         if '(request-target)' in signature:
             raise NotImplementedError
+        patterns = self.__class__.SIGNATURE_PATTERNS
 
-        parsed = IETFHmac.SIGNATURE_HEADER_PATTERN.fullmatch(signature)
-
-        if parsed is None:
-            raise InvalidSignature
-        if self.key_id is not None and parsed.group('key_id') != self.key_id:
+        parts = signature.split(',')
+        if len(parts) != 4:
             raise InvalidSignature
 
-        return parsed.group('headers'), parsed.group('signature')
+        parsed = {}
+        for part in parts:
+            matched = list(filter(lambda match: match[1] is not None,
+                                  map(lambda pattern: (pattern, patterns[pattern].fullmatch(part)),
+                                      patterns.keys())))
+            if len(matched) == 1:
+                key, match = matched[0]
+                parsed[key] = match.group(1)
+
+        if len(parsed.keys()) != 4:
+           raise InvalidSignature
+
+        if self.key_id is not None and parsed['key_id'] != self.key_id:
+            raise InvalidSignature
+
+        return parsed['headers'], parsed['signature']
 
     def extract_signature_from_header(self, request):
         header = request.headers[self.header]
@@ -247,18 +266,25 @@ class IETFHmac(Hmac):
                     data += '\n'
         return data
 
+    def _validate_digest(self, digest_header, data):
+            digests = digest_header.split(',')
+            for digest in digests:
+                algorithm, expected_value = digest.split('=', maxsplit=1)
+                print(algorithm, expected_value)
+                algorithm = algorithm.lower()
+                if algorithm not in self.__class__.DIGEST_ALGORITHMS:
+                    raise NotImplementedError
+                computed_value = self.__class__.DIGEST_ALGORITHMS[algorithm](data)
+                return bytes.decode(computed_value) == expected_value
+
     def validate_signature(self, request, only=None):
         if self.validate_digest:
             if 'Digest' not in request.headers:
                 raise InvalidSignature
-            digests = request.headers['Digest'].split(',')
-            for digest in digests:
-                algorithm, expected_value = digest.split('=', maxsplit=1)
-                algorithm = algorithm.lower()
-                if algorithm not in IETFHmac.DIGEST_ALGORITHMS:
-                    raise NotImplementedError
-                computed_value = IETFHmac.DIGEST_ALGORITHMS[algorithm](request.data)
-                if computed_value != expected_value:
-                    raise InvalidSignature
+
+            digests = request.headers['Digest']
+            passed_validation = self._validate_digest(digests, request.data)
+            if not passed_validation:
+                raise InvalidSignature
 
         return super().validate_signature(request, only)
